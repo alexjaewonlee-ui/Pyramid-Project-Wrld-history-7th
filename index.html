@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Mayan Pyramid</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #333;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        canvas {
+            box-shadow: 0 0 50px rgba(0,0,0,0.5);
+            background: #fff;
+        }
+    </style>
+</head>
+<body>
+
+<canvas id="pyramidCanvas"></canvas>
+
+<script>
+    /**
+     * Interactive Mayan Pyramid
+     * Features: 
+     * - 4 Levels + Temple
+     * - Interactive Interiors with specific furniture
+     * - Readable notes with multi-page support (Description + Rules)
+     */
+
+    const canvas = document.getElementById('pyramidCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    // Off-screen canvas for the static exterior (optimization)
+    const staticCanvas = document.createElement('canvas');
+    const staticCtx = staticCanvas.getContext('2d');
+
+    // --- Configuration & State ---
+    let width, height;
+    let viewState = 'OUTSIDE'; // 'OUTSIDE' or 'INSIDE'
+    let currentRoomId = null;
+    let animationFrameId;
+    let tick = 0; // For animation timing
+    let isReadingNote = false; 
+    let notePage = 0; // 0 = Description, 1 = Rules
+
+    const floors = 4;
+    
+    // Interaction Tracking
+    let mouseX = 0;
+    let mouseY = 0;
+    let hoveredId = null; 
+    let hitZones = []; 
+    
+    // UI Hitboxes
+    let noteHitbox = {x: 0, y: 0, w: 0, h: 0}; 
+    let nextBtnHitbox = {x:0, y:0, w:0, h:0};
+    let prevBtnHitbox = {x:0, y:0, w:0, h:0};
+
+    // Room Metadata
+    const roomLabels = {
+        'temple': "My Bedroom",
+        3: "Extra Room",
+        2: "Dining Room",
+        1: "Bathroom",
+        0: "The Attic"
+    };
+
+    // --- Content: Notes ---
+    const notesContent = {
+        'temple': "My bedroom is my favorite room. It’s scattered with posters of my favorite shows and lined with tons of books I've read along the walls. My bed is always nice and comforting, so it's the best place to be after a long day of studying.",
+        3: "This is my own personal study hall. I have a lot of my leftover stuff here, like random stuff that didn't fit into my room. It's nice and quiet there, which helps with my studying. A few posters of my favorite shows or games are on the wall.",
+        2: "The dining room is probably one of the best rooms. It’s, of course. The place we go to eat. I have many cherished memories there, so I hold it close to my heart. I sometimes do my homework there or just take a quick break. It's also ideal to play board games on the table there.",
+        1: "The bathroom is great. Well, of course, I don't dislike it or anything. There's a bathtub, a toilet, sinks, stuff like that. It’s always been pretty cozy.",
+        0: "The attic is always dusty. I’ve never been up there for too long, personally, but it's really dark there. There are spiderwebs everywhere and dust floating, which always makes me sneeze. There are also some leftover boxes there, remnants from when we moved in."
+    };
+
+    // --- Content: Rules ---
+    const defaultRules = ["1. NO RUNNING"];
+
+    const rulesContent = {
+        'temple': [ // Bedroom
+            "1. NO RUNNING",
+            "2. No yelling",
+            "3. Be respectful",
+            "4. No loitering",
+            "5. No littering"
+        ],
+        3: [ // Extra Room
+            "1. NO RUNNING",
+            "2. No yelling",
+            "3. Be respectful"
+        ],
+        2: [ // Dining Room
+            "1. NO RUNNING",
+            "2. No playing with food",
+            "3. No yelling",
+            "4. Be respectful"
+        ],
+        1: [ // Bathroom
+            "1. NO RUNNING",
+            "2. No loitering"
+        ],
+        0: [ // Attic
+            "1. NO RUNNING",
+            "2. Must get permission to get here",
+            "3. Must have parent supervision"
+        ]
+    };
+
+    // --- Initialization ---
+    function resize() {
+        width = window.innerWidth;
+        height = window.innerHeight;
+        
+        canvas.width = width;
+        canvas.height = height;
+        staticCanvas.width = width;
+        staticCanvas.height = height;
+        
+        renderStaticScene(); // Re-draw static background
+        
+        if (viewState === 'OUTSIDE') {
+            drawOutside();
+        }
+    }
+    window.addEventListener('resize', resize);
+
+    // --- Input Handling ---
+    canvas.addEventListener('mousemove', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        mouseX = e.clientX - rect.left;
+        mouseY = e.clientY - rect.top;
+        
+        if (viewState === 'OUTSIDE') {
+            checkHoverOutside();
+            drawOutside();
+        } else {
+            // INSIDE Interaction
+            if (isReadingNote) {
+                // Check UI buttons (Next/Prev)
+                let hoverUI = false;
+                if (notePage === 0 && isInside(mouseX, mouseY, nextBtnHitbox)) hoverUI = true;
+                if (notePage === 1 && isInside(mouseX, mouseY, prevBtnHitbox)) hoverUI = true;
+                
+                document.body.style.cursor = hoverUI ? 'pointer' : 'default'; 
+            } else {
+                // Check hover for back button
+                const hoverBack = (mouseX < 220 && mouseY < 60);
+                
+                // Check hover for Note (If one exists in this room)
+                let hoverNote = false;
+                if (noteHitbox.w > 0 && isInside(mouseX, mouseY, noteHitbox)) {
+                    hoverNote = true;
+                }
+
+                document.body.style.cursor = (hoverBack || hoverNote) ? 'pointer' : 'default';
+            }
+        }
+    });
+
+    canvas.addEventListener('mousedown', (e) => {
+        if (viewState === 'OUTSIDE') {
+            if (hoveredId !== null) {
+                enterRoom(hoveredId);
+            }
+        } else {
+            // INSIDE
+            if (isReadingNote) {
+                // 1. Check Next Button (Page 0 -> 1)
+                if (notePage === 0 && isInside(mouseX, mouseY, nextBtnHitbox)) {
+                    notePage = 1;
+                    return;
+                }
+                // 2. Check Prev Button (Page 1 -> 0)
+                if (notePage === 1 && isInside(mouseX, mouseY, prevBtnHitbox)) {
+                    notePage = 0;
+                    return;
+                }
+                
+                // 3. Click anywhere else -> Close Note
+                isReadingNote = false;
+                notePage = 0;
+            } else {
+                // Check Back Button
+                if (mouseX < 220 && mouseY < 60) {
+                    exitRoom();
+                    return;
+                }
+                
+                // Check Note Click
+                if (noteHitbox.w > 0 && isInside(mouseX, mouseY, noteHitbox)) {
+                    isReadingNote = true;
+                    notePage = 0; // Reset to page 1
+                }
+            }
+        }
+    });
+
+    // --- Logic Helpers ---
+    function isInside(x, y, rect) {
+        return x > rect.x && x < rect.x + rect.w && y > rect.y && y < rect.y + rect.h;
+    }
+
+    function checkHoverOutside() {
+        hoveredId = null;
+        document.body.style.cursor = 'default';
+        for (let i = hitZones.length - 1; i >= 0; i--) {
+            if (pointInPolygon([mouseX, mouseY], hitZones[i].points)) {
+                hoveredId = hitZones[i].id;
+                document.body.style.cursor = 'pointer';
+                break;
+            }
+        }
+    }
+
+    function pointInPolygon(point, vs) {
+        let x = point[0], y = point[1];
+        let inside = false;
+        for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
+            let xi = vs[i][0], yi = vs[i][1];
+            let xj = vs[j][0], yj = vs[j][1];
+            let intersect = ((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
+    }
+
+    function enterRoom(id) {
+        viewState = 'INSIDE';
+        currentRoomId = id;
+        tick = 0;
+        isReadingNote = false;
+        notePage = 0;
+        loopInterior();
+    }
+
+    function exitRoom() {
+        viewState = 'OUTSIDE';
+        currentRoomId = null;
+        isReadingNote = false;
+        cancelAnimationFrame(animationFrameId);
+        drawOutside();
+    }
+
+    // --- Drawing Helpers ---
+    function randomRange(min, max) { return Math.random() * (max - min) + min; }
+
+    function getStoneColor() {
+        const base = 200;
+        const variation = Math.random() * 40 - 20;
+        const val = Math.floor(base + variation);
+        return `rgb(${val}, ${val-5}, ${val-10})`;
+    }
+
+    function drawBlock(ctxTarget, x, y, w, h) {
+        ctxTarget.fillStyle = getStoneColor();
+        ctxTarget.fillRect(x, y, w, h);
+        
+        ctxTarget.strokeStyle = "rgba(255,255,255,0.3)";
+        ctxTarget.lineWidth = 1;
+        ctxTarget.beginPath();
+        ctxTarget.moveTo(x, y + h); ctxTarget.lineTo(x, y); ctxTarget.lineTo(x + w, y);
+        ctxTarget.stroke();
+
+        ctxTarget.strokeStyle = "rgba(0,0,0,0.2)";
+        ctxTarget.beginPath();
+        ctxTarget.moveTo(x + w, y); ctxTarget.lineTo(x + w, y + h); ctxTarget.lineTo(x, y + h);
+        ctxTarget.stroke();
+    }
+
+    // --- SCENE 1: THE PYRAMID (STATIC EXTERIOR) ---
+    function renderStaticScene() {
+        hitZones = []; 
+        const sCtx = staticCtx;
+
+        // Sky
+        const gradient = sCtx.createLinearGradient(0, 0, 0, height);
+        gradient.addColorStop(0, "#4a90e2");
+        gradient.addColorStop(0.6, "#87CEEB");
+        gradient.addColorStop(1, "#cce0ff");
+        sCtx.fillStyle = gradient;
+        sCtx.fillRect(0, 0, width, height);
+
+        // Jungle Background
+        sCtx.fillStyle = "#1e3c1e";
+        sCtx.beginPath(); sCtx.moveTo(0, height);
+        for (let x = 0; x <= width; x += 5) sCtx.lineTo(x, height - 100 - randomRange(50, 150) * 0.3);
+        sCtx.lineTo(width, height); sCtx.fill();
+
+        sCtx.fillStyle = "#2d5a27";
+        sCtx.beginPath(); sCtx.moveTo(0, height);
+        for (let x = 0; x <= width; x += 10) sCtx.lineTo(x, height - 80 - (Math.sin(x * 0.05) * 10 + randomRange(0, 20)));
+        sCtx.lineTo(width, height); sCtx.fill();
+
+        // Pyramid Calculation
+        const centerX = width / 2;
+        const pyramidBaseWidth = Math.min(width * 0.8, 800);
+        const pyramidHeight = Math.min(height * 0.6, 500);
+        const floorHeight = pyramidHeight / floors;
+        const topWidth = 150;
+        const slope = (pyramidBaseWidth - topWidth) / 2 / pyramidHeight;
+
+        // Draw Floors
+        for (let f = 0; f < floors; f++) {
+            const floorBottomY = height - 100 - (f * floorHeight);
+            const floorTopY = floorBottomY - floorHeight;
+            const currentBottomWidth = pyramidBaseWidth - 2 * (slope * (f * floorHeight));
+            const currentTopWidth = pyramidBaseWidth - 2 * (slope * ((f + 1) * floorHeight));
+            
+            const floorStartX = centerX - currentBottomWidth / 2;
+            const floorEndX = centerX + currentBottomWidth / 2;
+            const topStartX = centerX - currentTopWidth / 2;
+            const topEndX = centerX + currentTopWidth / 2;
+
+            const points = [[floorStartX, floorBottomY], [floorEndX, floorBottomY], [topEndX, floorTopY], [topStartX, floorTopY]];
+            hitZones.push({ id: f, points: points });
+
+            // Shape
+            sCtx.beginPath();
+            sCtx.moveTo(floorStartX, floorBottomY); sCtx.lineTo(floorEndX, floorBottomY);
+            sCtx.lineTo(topEndX, floorTopY); sCtx.lineTo(topStartX, floorTopY);
+            sCtx.closePath(); sCtx.fillStyle = "#bbb"; sCtx.fill();
+
+            // Texture
+            const brickHeight = 15;
+            const rows = Math.ceil(floorHeight / brickHeight);
+            sCtx.save(); sCtx.clip(); 
+            for (let r = 0; r < rows; r++) {
+                const rowY = floorBottomY - (r * brickHeight) - brickHeight;
+                const brickWidth = 25;
+                const cols = Math.ceil(currentBottomWidth / brickWidth) + 2;
+                const offset = (r % 2 === 0) ? 0 : brickWidth / 2;
+                for (let c = 0; c < cols; c++) {
+                    const bx = floorStartX + (c * brickWidth) - offset;
+                    drawBlock(sCtx, bx, rowY, brickWidth, brickHeight);
+                }
+            }
+            sCtx.restore();
+
+            // Shading
+            sCtx.fillStyle = "rgba(0,0,0,0.1)";
+            sCtx.beginPath(); sCtx.moveTo(centerX, floorTopY); sCtx.lineTo(topEndX, floorTopY);
+            sCtx.lineTo(floorEndX, floorBottomY); sCtx.lineTo(centerX, floorBottomY); sCtx.fill();
+            if (f > 0) { sCtx.fillStyle = "rgba(0,0,0,0.3)"; sCtx.fillRect(floorStartX, floorBottomY, currentBottomWidth, 5); }
+        }
+
+        // Stairs
+        const stairWidth = 80;
+        const totalSteps = floors * 10;
+        const stepHeight = pyramidHeight / totalSteps;
+        const stairBottomY = height - 100;
+        const stairTopY = stairBottomY - pyramidHeight;
+        
+        sCtx.fillStyle = "#a8a8a8";
+        // Walls
+        sCtx.beginPath(); sCtx.moveTo(centerX - stairWidth/2 - 12, stairBottomY + 10);
+        sCtx.lineTo(centerX - stairWidth/2, stairBottomY + 10); sCtx.lineTo(centerX - stairWidth/2, stairTopY); sCtx.lineTo(centerX - stairWidth/2 - 12, stairTopY); sCtx.fill();
+        sCtx.beginPath(); sCtx.moveTo(centerX + stairWidth/2, stairBottomY + 10); sCtx.lineTo(centerX + stairWidth/2 + 12, stairBottomY + 10); sCtx.lineTo(centerX + stairWidth/2 + 12, stairTopY); sCtx.lineTo(centerX + stairWidth/2, stairTopY); sCtx.fill();
+
+        for (let s = 0; s < totalSteps; s++) {
+            const sy = stairBottomY - (s * stepHeight);
+            const sx = centerX - stairWidth / 2;
+            sCtx.fillStyle = "#8a8a8a"; sCtx.fillRect(sx, sy - stepHeight, stairWidth, stepHeight);
+            sCtx.fillStyle = "#d3d3d3"; sCtx.fillRect(sx, sy - stepHeight, stairWidth, stepHeight * 0.4);
+        }
+
+        // Temple Top
+        const templeW = 120;
+        const templeH = 70;
+        const templeX = centerX - templeW / 2;
+        const templeY = stairTopY - templeH;
+        const templePoints = [[templeX, templeY], [templeX + templeW, templeY], [templeX + templeW, templeY + templeH], [templeX, templeY + templeH]];
+        hitZones.push({ id: 'temple', points: templePoints });
+
+        drawBlock(sCtx, templeX, templeY, templeW, templeH);
+        for(let tx = 0; tx < templeW; tx+=20) for(let ty = 0; ty < templeH; ty+=10) drawBlock(sCtx, templeX + tx, templeY + ty, 20, 10);
+
+        sCtx.fillStyle = "#1a1a1a"; sCtx.fillRect(centerX - 15, templeY + templeH - 45, 30, 45);
+        sCtx.beginPath(); sCtx.moveTo(templeX - 5, templeY); sCtx.lineTo(templeX + templeW + 5, templeY); sCtx.lineTo(templeX + templeW - 10, templeY - 20); sCtx.lineTo(templeX + 10, templeY - 20); sCtx.fillStyle = "#e0e0e0"; sCtx.fill();
+        
+        const combW = 80; const combH = 40; const combX = centerX - combW / 2; const combY = templeY - 20 - combH;
+        sCtx.fillStyle = "#c0c0c0"; sCtx.fillRect(combX, combY, combW, combH);
+        sCtx.fillStyle = "#87CEEB"; 
+        for(let i=0; i<3; i++) for(let j=0; j<2; j++) sCtx.fillRect(combX + 15 + (i*20), combY + 5 + (j*15), 10, 10);
+
+        // Decor (Serpent heads + Vines)
+        drawSerpentHead(centerX - stairWidth/2 - 12, stairBottomY);
+        drawSerpentHead(centerX + stairWidth/2, stairBottomY);
+        
+        sCtx.strokeStyle = "#3a6e3a"; sCtx.lineWidth = 2;
+        for (let f = 1; f <= floors; f++) {
+            const y = height - 100 - (f * floorHeight);
+            const w = pyramidBaseWidth - 2 * (slope * (f * floorHeight));
+            const startX = centerX - w/2;
+            for (let i = 0; i < 5; i++) {
+                let vx = startX + Math.random() * w; let vy = y; let vineLen = Math.random() * 40 + 10;
+                sCtx.beginPath(); sCtx.moveTo(vx, vy);
+                for(let k=0; k<vineLen; k+=5) { vx += Math.random()*4 - 2; sCtx.lineTo(vx, vy + k); }
+                sCtx.stroke();
+            }
+        }
+        sCtx.fillStyle = "#3b7c28"; sCtx.fillRect(0, height - 100, width, 100);
+    }
+
+    function drawSerpentHead(x, y) {
+        staticCtx.fillStyle = "#999"; staticCtx.fillRect(x - 5, y - 15, 25, 25); staticCtx.fillRect(x - 5, y, 25, 10);
+        staticCtx.fillStyle = "#000"; staticCtx.fillRect(x + 5, y - 10, 5, 5);
+        staticCtx.fillStyle = "rgba(0,0,0,0.5)"; staticCtx.fillRect(x, y+5, 15, 2);
+    }
+
+    function drawOutside() {
+        ctx.clearRect(0, 0, width, height);
+        ctx.drawImage(staticCanvas, 0, 0);
+
+        if (hoveredId !== null) {
+            const zone = hitZones.find(z => z.id === hoveredId);
+            if (zone) {
+                ctx.save(); ctx.beginPath();
+                ctx.moveTo(zone.points[0][0], zone.points[0][1]);
+                for(let i=1; i<zone.points.length; i++) ctx.lineTo(zone.points[i][0], zone.points[i][1]);
+                ctx.closePath();
+                ctx.fillStyle = "rgba(255, 255, 200, 0.4)"; ctx.fill();
+                ctx.strokeStyle = "rgba(255,255,255,0.8)"; ctx.lineWidth = 2; ctx.stroke();
+                ctx.restore();
+                drawTooltip();
+            }
+        }
+    }
+
+    function drawTooltip() {
+        const label = roomLabels[hoveredId];
+        if (!label) return;
+        ctx.font = "bold 16px sans-serif";
+        const w = ctx.measureText(label).width + 20;
+        let tx = mouseX + 15; let ty = mouseY + 15;
+        if (tx + w > width) tx = mouseX - w - 15;
+        if (ty + 40 > height) ty = mouseY - 40 - 15;
+        ctx.shadowColor = "rgba(0,0,0,0.5)"; ctx.shadowBlur = 10;
+        ctx.fillStyle = "white"; ctx.beginPath(); ctx.roundRect(tx, ty, w, 40, 5); ctx.fill();
+        ctx.shadowBlur = 0; ctx.fillStyle = "black"; ctx.fillText(label, tx + 10, ty + 25);
+    }
+
+
+    // --- SCENE 2: INTERIORS ---
+
+    function loopInterior() {
+        if (viewState !== 'INSIDE') return;
+        tick++;
+        drawInterior();
+        animationFrameId = requestAnimationFrame(loopInterior);
+    }
+
+    function drawInterior() {
+        noteHitbox = {x: 0, y: 0, w: 0, h: 0};
+        nextBtnHitbox = {x:0, y:0, w:0, h:0};
+        prevBtnHitbox = {x:0, y:0, w:0, h:0};
+
+        // Clear & Room Box
+        ctx.fillStyle = "#111"; ctx.fillRect(0, 0, width, height);
+        const cx = width / 2; const cy = height / 2;
+        const bw = width * 0.4; const bh = height * 0.4;
+        const bx = cx - bw/2; const by = cy - bh/2;
+        
+        const gradientWalls = ctx.createLinearGradient(0, 0, 0, height);
+        gradientWalls.addColorStop(0, "#2a2a2a"); gradientWalls.addColorStop(1, "#1a1a1a");
+        ctx.fillStyle = gradientWalls;
+        
+        ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(width,0); ctx.lineTo(bx+bw, by); ctx.lineTo(bx, by); ctx.fill();
+        ctx.fillStyle = "#3a3a3a"; ctx.beginPath(); ctx.moveTo(0,height); ctx.lineTo(width,height); ctx.lineTo(bx+bw, by+bh); ctx.lineTo(bx, by+bh); ctx.fill();
+        ctx.fillStyle = "#222"; ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(bx, by); ctx.lineTo(bx, by+bh); ctx.lineTo(0, height); ctx.fill();
+        ctx.fillStyle = "#1f1f1f"; ctx.beginPath(); ctx.moveTo(width,0); ctx.lineTo(bx+bw, by); ctx.lineTo(bx+bw, by+bh); ctx.lineTo(width, height); ctx.fill();
+        ctx.fillStyle = "#252525"; ctx.fillRect(bx, by, bw, bh);
+
+        drawTorch(bx + 20, by + bh/2);
+        drawTorch(bx + bw - 20, by + bh/2);
+
+        // Room Title
+        const label = roomLabels[currentRoomId];
+        ctx.save();
+        ctx.fillStyle = "rgba(255,255,255,0.3)"; ctx.font = "40px sans-serif"; ctx.textAlign = "center";
+        ctx.fillText(label.toUpperCase(), cx, height - 50);
+
+        // --- SPECIFIC ROOM RENDERING ---
+        if (currentRoomId === 'temple') { // BEDROOM
+            // Bookshelves
+            const shelfW = 80; const shelfH = 150; const shelfY = by + bh - shelfH;
+            let bookSeed = 0;
+            const getPseudoRandom = () => { bookSeed++; const x = Math.sin(bookSeed * 9999); return x - Math.floor(x); };
+            const drawShelf = (x, y) => {
+                ctx.fillStyle = "#5d4037"; ctx.fillRect(x, y, shelfW, shelfH); 
+                ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 4; ctx.strokeRect(x, y, shelfW, shelfH); 
+                for (let sy = y + 20; sy < y + shelfH; sy += 35) {
+                    ctx.fillStyle = "#3e2723"; ctx.fillRect(x + 2, sy, shelfW - 4, 4); 
+                    let bx = x + 5;
+                    while (bx < x + shelfW - 10) {
+                        const r1 = getPseudoRandom(); const r2 = getPseudoRandom(); const r3 = getPseudoRandom();
+                        const bookW = 5 + r1 * 10; const bookH = 15 + r2 * 15;
+                        const colors = ["#8b0000", "#006400", "#00008b", "#8b4513", "#d2691e", "#f4a460"];
+                        ctx.fillStyle = colors[Math.floor(r3 * colors.length)]; ctx.fillRect(bx, sy - bookH, bookW, bookH); bx += bookW + 1;
+                    }
+                }
+            };
+            drawShelf(bx + 30, shelfY); drawShelf(bx + bw - 30 - shelfW, shelfY); 
+
+            // Bed
+            ctx.fillStyle = "#8b4513"; ctx.fillRect(cx - 80, by + bh - 90, 160, 60); 
+            ctx.fillStyle = "#eee"; ctx.fillRect(cx - 75, cy + 20, 150, 230); // Long mattress
+            ctx.fillStyle = "#3498db"; ctx.fillRect(cx - 75, cy + 90, 150, 160); // Long blanket
+            ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.roundRect(cx - 50, cy + 30, 100, 30, 10); ctx.fill();
+            ctx.fillStyle = "#001133"; ctx.fillRect(cx - 40, by + 20, 80, 60); ctx.fillStyle = "#fff"; if (Math.random()>0.9) ctx.fillRect(cx, by+40, 2, 2); 
+
+            // Note
+            const noteX = cx + 120; const noteY = cy + 80; const noteW = 40; const noteH = 50;
+            noteHitbox = { x: noteX, y: noteY, w: noteW, h: noteH };
+            ctx.fillStyle = "#f3e5ab"; ctx.shadowColor = "rgba(0,0,0,0.5)"; ctx.shadowBlur = 5; ctx.fillRect(noteX, noteY, noteW, noteH); ctx.shadowBlur = 0;
+            ctx.fillStyle = "rgba(0,0,0,0.3)"; for(let i=10; i<noteH-5; i+=8) ctx.fillRect(noteX + 5, noteY + i, noteW - 10, 1);
+
+        } else if (currentRoomId === 3) { // EXTRA ROOM (Study)
+            ctx.fillStyle = "#1e3799"; ctx.fillRect(bx + 50, by + 50, 60, 80); ctx.strokeStyle = "#ccc"; ctx.lineWidth = 1; ctx.strokeRect(bx + 50, by + 50, 60, 80);
+            ctx.fillStyle = "#b71540"; ctx.fillRect(bx + bw - 110, by + 60, 60, 80); ctx.strokeStyle = "#ccc"; ctx.strokeRect(bx + bw - 110, by + 60, 60, 80);
+            ctx.fillStyle = "#eaddcf"; ctx.beginPath(); ctx.moveTo(cx+50, cy+150); ctx.lineTo(cx+200, cy+150); ctx.lineTo(cx+150, cy+100); ctx.lineTo(cx, cy+100); ctx.fill();
+            ctx.fillStyle = "#8b4513"; ctx.beginPath(); ctx.moveTo(cx - 150, cy + 120); ctx.lineTo(cx + 150, cy + 120); ctx.lineTo(cx + 120, cy + 80); ctx.lineTo(cx - 120, cy + 80); ctx.fill();
+            ctx.fillStyle = "#5d4037"; ctx.fillRect(cx - 150, cy + 120, 300, 10); ctx.fillRect(cx - 140, cy + 120, 15, 60); ctx.fillRect(cx + 125, cy + 120, 15, 60);
+            
+            // Papers & Note
+            ctx.fillStyle = "#f3e5ab"; 
+            const noteX = cx - 40; const noteY = cy + 90; const noteW = 50; const noteH = 35;
+            ctx.fillRect(noteX, noteY, noteW, noteH);
+            ctx.fillStyle = "rgba(0,0,0,0.3)"; for(let i=8; i<noteH-5; i+=6) ctx.fillRect(noteX + 5, noteY + i, noteW - 10, 1);
+            noteHitbox = { x: noteX, y: noteY, w: noteW, h: noteH };
+
+            ctx.save(); ctx.translate(cx + 40, cy + 100); ctx.rotate(0.2); ctx.fillStyle = "#fcf5e5"; ctx.fillRect(0, 0, 40, 30); ctx.fillStyle = "rgba(0,0,0,0.2)"; ctx.fillRect(5, 5, 30, 1); ctx.fillRect(5, 10, 25, 1); ctx.fillRect(5, 15, 28, 1); ctx.restore();
+            ctx.fillStyle = "#222"; ctx.beginPath(); ctx.arc(cx + 100, cy + 95, 10, 0, Math.PI*2); ctx.fill();
+            ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(cx + 100, cy + 95); ctx.quadraticCurveTo(cx + 110, cy + 60, cx + 125, cy + 45); ctx.stroke();
+            ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.ellipse(cx + 120, cy + 55, 20, 5, -Math.PI/4, 0, Math.PI*2); ctx.fill();
+
+        } else if (currentRoomId === 2) { // DINING
+            ctx.fillStyle = "#666"; ctx.beginPath(); ctx.moveTo(cx - 200, cy + 150); ctx.lineTo(cx + 200, cy + 150); ctx.lineTo(cx + 150, cy + 80); ctx.lineTo(cx - 150, cy + 80); ctx.fill();
+            ctx.fillStyle = "#d4ac0d"; ctx.beginPath(); ctx.arc(cx, cy+110, 15, 0, Math.PI, false); ctx.fill();
+            ctx.fillStyle = "#e67e22"; ctx.beginPath(); ctx.arc(cx - 60, cy+100, 15, 0, Math.PI, false); ctx.fill();
+            ctx.fillStyle = "#27ae60"; ctx.fillRect(cx + 60, cy + 90, 15, 25);
+            
+            const noteX = cx + 80; const noteY = cy + 110; const noteW = 30; const noteH = 25;
+            noteHitbox = { x: noteX, y: noteY, w: noteW, h: noteH };
+            ctx.fillStyle = "#f3e5ab"; ctx.shadowColor = "rgba(0,0,0,0.5)"; ctx.shadowBlur = 5; ctx.fillRect(noteX, noteY, noteW, noteH); ctx.shadowBlur = 0;
+            ctx.fillStyle = "rgba(0,0,0,0.3)"; for(let i=5; i<noteH-3; i+=5) ctx.fillRect(noteX + 3, noteY + i, noteW - 6, 1);
+
+        } else if (currentRoomId === 1) { // BATHROOM
+            ctx.fillStyle = "#3498db"; ctx.globalAlpha = 0.6; ctx.beginPath(); ctx.ellipse(cx, cy + 100, 200, 60, 0, 0, Math.PI*2); ctx.fill();
+            ctx.globalAlpha = 1.0; ctx.strokeStyle = "#777"; ctx.lineWidth = 5; ctx.stroke();
+            ctx.fillStyle = "rgba(255,255,255,0.2)"; ctx.beginPath(); ctx.arc(cx - 50, cy + 100 - (tick % 50), 10, 0, Math.PI*2); ctx.fill();
+            
+            const noteX = cx + 150; const noteY = cy + 120; const noteW = 40; const noteH = 50;
+            noteHitbox = { x: noteX, y: noteY, w: noteW, h: noteH };
+            ctx.fillStyle = "#f3e5ab"; ctx.shadowColor = "rgba(0,0,0,0.5)"; ctx.shadowBlur = 5; ctx.fillRect(noteX, noteY, noteW, noteH); ctx.shadowBlur = 0;
+            ctx.fillStyle = "rgba(0,0,0,0.3)"; for(let i=10; i<noteH-5; i+=8) ctx.fillRect(noteX + 5, noteY + i, noteW - 10, 1);
+
+        } else if (currentRoomId === 0) { // ATTIC
+            ctx.strokeStyle = "rgba(0,0,0,0.4)"; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.moveTo(bx + bw*0.2, by + bh*0.2); ctx.lineTo(bx + bw*0.25, by + bh*0.4); ctx.lineTo(bx + bw*0.22, by + bh*0.55); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(bx + bw + 10, by + 50); ctx.lineTo(bx + bw + 60, by + 120); ctx.lineTo(bx + bw + 40, by + 160); ctx.stroke();
+            ctx.strokeStyle = "rgba(255,255,255,0.2)"; ctx.lineWidth = 1; ctx.beginPath();
+            for(let i=0; i<8; i++) { ctx.moveTo(width, 0); ctx.lineTo(width - Math.cos(i*0.2)*200, Math.sin(i*0.2)*200); }
+            for(let j=20; j<200; j+=20) for(let i=0; i<8; i++) { let angle = i*0.2; let rx = width - Math.cos(angle)*j; let ry = Math.sin(angle)*j; if(i==0) ctx.moveTo(rx, ry); else ctx.lineTo(rx, ry); }
+            ctx.stroke();
+
+            const drawCrate = (x, y, w, h, onFloor) => {
+                if (onFloor) { ctx.save(); ctx.fillStyle = "rgba(0,0,0,0.4)"; ctx.beginPath(); ctx.moveTo(x - 5, y + h); ctx.lineTo(x + w + 10, y + h); ctx.lineTo(x + w + 20, y + h + 15); ctx.lineTo(x + 5, y + h + 15); ctx.fill(); ctx.restore(); }
+                ctx.fillStyle = "#5d4037"; ctx.fillRect(x, y, w, h); ctx.fillStyle = "#6d4c41"; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x+15, y-10); ctx.lineTo(x+w+15, y-10); ctx.lineTo(x+w, y); ctx.fill();
+                ctx.fillStyle = "#4e342e"; ctx.beginPath(); ctx.moveTo(x+w, y); ctx.lineTo(x+w+15, y-10); ctx.lineTo(x+w+15, y+h-10); ctx.lineTo(x+w, y+h); ctx.fill();
+                ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 2; ctx.strokeRect(x, y, w, h); ctx.beginPath(); for(let i=15; i<h; i+=15) { ctx.moveTo(x, y+i); ctx.lineTo(x+w, y+i); } ctx.moveTo(x, y); ctx.lineTo(x+w, y+h); ctx.moveTo(x+w, y); ctx.lineTo(x, y+h); ctx.stroke();
+            };
+            drawCrate(cx - 250, cy + 50, 80, 80, true); drawCrate(cx - 240, cy - 20, 70, 70, false); 
+            drawCrate(cx + 150, cy + 60, 90, 80, true); drawCrate(cx + 100, cy + 100, 60, 40, true);
+
+            const noteX = cx; const noteY = cy + 150; const noteW = 40; const noteH = 50;
+            noteHitbox = { x: noteX, y: noteY, w: noteW, h: noteH };
+            ctx.fillStyle = "#f3e5ab"; ctx.shadowColor = "rgba(0,0,0,0.5)"; ctx.shadowBlur = 5; ctx.fillRect(noteX, noteY, noteW, noteH); ctx.shadowBlur = 0;
+            ctx.fillStyle = "rgba(0,0,0,0.3)"; for(let i=10; i<noteH-5; i+=8) ctx.fillRect(noteX + 5, noteY + i, noteW - 10, 1);
+
+            ctx.fillStyle = "rgba(255,255,255,0.15)";
+            for(let i=0; i<20; i++) { const dx = (tick * 2 + i * 50) % width; const dy = (tick + i * 30) % height; ctx.beginPath(); ctx.arc(dx, dy, Math.random()*2 + 1, 0, Math.PI*2); ctx.fill(); }
+        }
+        ctx.restore();
+
+        // --- OVERLAY: NOTE READING ---
+        if (isReadingNote) {
+            ctx.fillStyle = "rgba(0,0,0,0.7)";
+            ctx.fillRect(0, 0, width, height);
+            
+            const paperW = Math.min(600, width * 0.8);
+            const paperH = Math.min(400, height * 0.8);
+            const paperX = (width - paperW) / 2;
+            const paperY = (height - paperH) / 2;
+
+            ctx.fillStyle = "#f3e5ab";
+            ctx.fillRect(paperX, paperY, paperW, paperH);
+            ctx.strokeStyle = "#d4c59a"; ctx.lineWidth = 10;
+            ctx.strokeRect(paperX, paperY, paperW, paperH);
+
+            ctx.fillStyle = "#3e2723";
+            ctx.textAlign = "left";
+            
+            if (notePage === 0) {
+                // PAGE 1: DESCRIPTION
+                ctx.font = "20px 'Courier New', monospace";
+                let textToRead = notesContent[currentRoomId] || "";
+                wrapText(ctx, textToRead, paperX + 40, paperY + 60, paperW - 80, 30);
+                
+                // Draw "Next Page" Button
+                const btnW = 200; const btnH = 40;
+                const btnX = paperX + paperW - btnW - 20; const btnY = paperY + paperH - btnH - 20;
+                nextBtnHitbox = {x: btnX, y: btnY, w: btnW, h: btnH};
+                
+                ctx.fillStyle = "#d4c59a"; ctx.fillRect(btnX, btnY, btnW, btnH);
+                ctx.strokeStyle = "#8b4513"; ctx.lineWidth = 2; ctx.strokeRect(btnX, btnY, btnW, btnH);
+                ctx.fillStyle = "#3e2723"; ctx.font = "bold 16px sans-serif"; ctx.fillText("Go to the next page →", btnX + 15, btnY + 25);
+
+            } else {
+                // PAGE 2: RULES
+                ctx.font = "bold 24px 'Courier New', monospace";
+                ctx.fillText("HOUSE RULES", paperX + 40, paperY + 60);
+                
+                // Fetch rules
+                let rulesToDisplay = rulesContent[currentRoomId] || defaultRules;
+
+                ctx.font = "20px 'Courier New', monospace";
+                for(let i=0; i<rulesToDisplay.length; i++) {
+                    ctx.fillText(rulesToDisplay[i], paperX + 40, paperY + 110 + (i*40));
+                }
+
+                // Draw "Prev Page" Button
+                const btnW = 150; const btnH = 40;
+                const btnX = paperX + 20; const btnY = paperY + paperH - btnH - 20;
+                prevBtnHitbox = {x: btnX, y: btnY, w: btnW, h: btnH};
+                
+                ctx.fillStyle = "#d4c59a"; ctx.fillRect(btnX, btnY, btnW, btnH);
+                ctx.strokeStyle = "#8b4513"; ctx.lineWidth = 2; ctx.strokeRect(btnX, btnY, btnW, btnH);
+                ctx.fillStyle = "#3e2723"; ctx.font = "bold 16px sans-serif"; ctx.fillText("← Previous Page", btnX + 15, btnY + 25);
+            }
+            
+            ctx.font = "italic 16px sans-serif"; ctx.fillStyle = "#888"; ctx.textAlign = "center";
+            ctx.fillText("(Click outside to close)", width/2, paperY - 15);
+        }
+
+        drawBackButton();
+    }
+
+    function wrapText(context, text, x, y, maxWidth, lineHeight) {
+        var words = text.split(' ');
+        var line = '';
+        for(var n = 0; n < words.length; n++) {
+          var testLine = line + words[n] + ' ';
+          var metrics = context.measureText(testLine);
+          var testWidth = metrics.width;
+          if (testWidth > maxWidth && n > 0) {
+            context.fillText(line, x, y);
+            line = words[n] + ' ';
+            y += lineHeight;
+          }
+          else {
+            line = testLine;
+          }
+        }
+        context.fillText(line, x, y);
+    }
+
+    function drawTorch(x, y) {
+        ctx.fillStyle = "#654321"; ctx.fillRect(x - 2, y, 4, 30);
+        const flicker = Math.random() * 5;
+        ctx.beginPath(); ctx.arc(x, y - 5, 8 + flicker, 0, Math.PI*2); ctx.fillStyle = "orange"; ctx.fill();
+        ctx.beginPath(); ctx.arc(x, y - 5, 4 + flicker/2, 0, Math.PI*2); ctx.fillStyle = "yellow"; ctx.fill();
+        const grad = ctx.createRadialGradient(x, y, 0, x, y, 60);
+        grad.addColorStop(0, "rgba(255, 165, 0, 0.2)"); grad.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(x, y, 60, 0, Math.PI*2); ctx.fill();
+    }
+
+    function drawPot(x, y, color) {
+        ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, y, 20, 0, Math.PI*2); ctx.fill();
+        ctx.fillRect(x-10, y-25, 20, 10);
+    }
+
+    function drawBackButton() {
+        if (isReadingNote) return; // Hide button when reading note
+        const hover = (mouseX < 220 && mouseY < 60);
+        ctx.fillStyle = hover ? "#555" : "#333";
+        ctx.fillRect(20, 20, 200, 40);
+        ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.strokeRect(20, 20, 200, 40);
+        ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif"; ctx.textAlign = "left"; ctx.fillText("← Back to Pyramid", 40, 45);
+    }
+
+    resize();
+
+</script>
+
+</body>
+</html>
